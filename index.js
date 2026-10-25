@@ -939,7 +939,29 @@ const HTML_PAGE = `
         </div>
     </div>
 
-
+    <div class="container">
+        <div class="header">
+            <h1 data-i18n="header.title">VoiceCraft</h1>
+            <p class="subtitle" data-i18n="header.subtitle">AI-Powered Voice Processing Platform</p>
+            <div class="features">
+                <div class="feature-item">
+                    <span class="feature-icon">✨</span>
+                    <span data-i18n="header.feature1">20+ Voice Options</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">⚡</span>
+                    <span data-i18n="header.feature2">Lightning Fast</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">🆓</span>
+                    <span data-i18n="header.feature3">Completely Free</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">📱</span>
+                    <span data-i18n="header.feature4">Download Support</span>
+                </div>
+            </div>
+        </div>
         
         <!-- 主功能切换器 -->
         <div class="mode-switcher">
@@ -2078,54 +2100,85 @@ const HTML_PAGE = `
 </body>
 </html>
 `;
-// 1. 来源校验（防外部网站 iframe 或外部 AJAX 盗刷）
-function validateOrigin(request) {
-    const origin = request.headers.get("Origin");
-    const referer = request.headers.get("Referer");
-    const host = request.headers.get("Host");
 
-    // 如果通过同源网页直接点击访问，Referer 必须包含自己的 Host
-    if (referer && !referer.includes(host)) {
-        return false;
-    }
-    return true;
-}
-
-// 2. 访问密钥/认证校验
-function validateAuth(request, env) {
-    // 允许通过请求头传入 x-api-key 或 Authorization
-    const clientKey = request.headers.get("x-api-key") || 
-                      (request.headers.get("Authorization") || "").replace("Bearer ", "");
-    
-    // 如果你在 Workers 环境变量配置了 API_ACCESS_KEY，则进行匹配
-    if (env.API_ACCESS_KEY && clientKey !== env.API_ACCESS_KEY) {
-        return false;
-    }
-    return true;
-}
-
-// 统一返回 403 响应
-function forbiddenResponse(message = "Forbidden: Access denied") {
-    return new Response(JSON.stringify({
-        error: { message, code: "forbidden", type: "auth_error" }
-    }), {
-        status: 403,
-        headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
-    });
-}
 export default {
     async fetch(request, env, ctx) {
         return handleRequest(request, env);
     }
 };
 
+// 判断是否为本站 HTML 页面的同源调用：Origin 或 Referer 与请求自身同源即免验证
+function isSameOriginRequest(request) {
+    const url = new URL(request.url);
+    for (const header of ["Origin", "Referer"]) {
+        const value = request.headers.get(header);
+        if (value) {
+            try {
+                if (new URL(value).origin === url.origin) {
+                    return true;
+                }
+            } catch {
+                // 忽略非法 header，继续检查下一个
+            }
+        }
+    }
+    return false;
+}
+
+// API Key 校验：同源调用直接放行；否则要求 Authorization: Bearer <key> 或 x-api-key 与 env.API_KEY 一致
+// 返回 null 表示通过，返回 Response 表示拒绝
+function checkApiKey(request, env) {
+    if (isSameOriginRequest(request)) {
+        return null;
+    }
+    const expected = env && env.API_ACCESS_KEY;
+    if (!expected) {
+        return unauthorizedResponse("服务端未配置 API_KEY");
+    }
+    const auth = request.headers.get("Authorization") || "";
+    const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+    const apiKey = bearer || request.headers.get("x-api-key") || "";
+    if (apiKey !== expected) {
+        return unauthorizedResponse("缺少或无效的 API Key");
+    }
+    return null;
+}
+
+function unauthorizedResponse(message) {
+    return new Response(JSON.stringify({
+        error: {
+            message,
+            type: "auth_error",
+            param: null,
+            code: "unauthorized"
+        }
+    }), {
+        status: 401,
+        headers: {
+            "Content-Type": "application/json",
+            ...makeCORSHeaders()
+        }
+    });
+}
+
 async function handleRequest(request, env) {
     if (request.method === "OPTIONS") {
         return handleOptions(request);
     }
 
+
+
+
     const requestUrl = new URL(request.url);
     const path = requestUrl.pathname;
+
+    // API Key 验证：/v1/audio/* 需要验证；本站 HTML 页面的同源直接调用免验证
+    if (path === "/v1/audio/speech" || path === "/v1/audio/transcriptions") {
+        const authError = checkApiKey(request, env);
+        if (authError) {
+            return authError;
+        }
+    }
 
     // 返回前端页面
     if (path === "/" || path === "/index.html") {
@@ -2137,19 +2190,6 @@ async function handleRequest(request, env) {
         });
     }
 
-    // 2. API 路由统一校验
-    if (path === "/v1/audio/transcriptions" || path === "/v1/audio/speech") {
-        // 防盗链校验：阻止来自第三方域名的跨域调用
-        if (!validateOrigin(request)) {
-            return forbiddenResponse("Invalid Origin or Referer");
-        }
-
-        // 密钥校验：如果配置了环境变量 API_ACCESS_KEY，校验前端传来的密钥
-        // 如果此网站只给自己个人使用，开启此校验最稳妥
-        if (env.API_ACCESS_KEY && !validateAuth(request, env)) {
-            return forbiddenResponse("Invalid API Access Key");
-        }
-    }
     if (path === "/v1/audio/transcriptions") {
         try {
             return await handleAudioTranscription(request, env);
@@ -2569,7 +2609,7 @@ function makeCORSHeaders() {
     return {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET,HEAD,POST,OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, x-api-key, Authorization",
+        "Access-Control-Allow-Headers": "Content-Type, x-api-key",
         "Access-Control-Max-Age": "86400"
     };
 }
@@ -2760,7 +2800,7 @@ async function handleFileUpload(request) {
 }
 
 // 处理语音转录的函数
-async function handleAudioTranscription(request) {
+async function handleAudioTranscription(request, env) {
     try {
         // 验证请求方法
         if (request.method !== 'POST') {
@@ -2870,7 +2910,24 @@ async function handleAudioTranscription(request) {
         }
 
         // 使用默认token或用户提供的token
-        const token = customToken || 'sk-wtldsvuprmwltxpbspbmawtolbacghzawnjhtlzlnujjkfhh';
+        const token = customToken || (env && env.SILICONFLOW_TOKEN) || '';
+
+        if (!token) {
+            return new Response(JSON.stringify({
+                error: {
+                    message: "未配置转录 Token：请在 Cloudflare 中设置 SILICONFLOW_TOKEN secret，或在请求中传 token",
+                    type: "api_error",
+                    param: null,
+                    code: "missing_transcription_token"
+                }
+            }), {
+                status: 500,
+                headers: {
+                    "Content-Type": "application/json",
+                    ...makeCORSHeaders()
+                }
+            });
+        }
 
         // 构建发送到硅基流动API的FormData
         const apiFormData = new FormData();
@@ -2945,4 +3002,3 @@ async function handleAudioTranscription(request) {
         });
     }
 }
-
